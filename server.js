@@ -1,151 +1,138 @@
-import asyncio
-import websockets
-import json
-import time
-import uuid
+const WebSocket = require('ws');
+const crypto = require('crypto');
 
-waiting = []
-battles = {}
+const wss = new WebSocket.Server({ port: process.env.PORT || 8080 });
+const waiting = [];
+const battles = new Map();
 
-class Battle:
-    def __init__(self, ws1, id1, ws2, id2):
-        self.id = str(uuid.uuid4())[:8]
-        self.players = {
-            ws1: {"ws": ws1, "id": id1, "clicks": 0, "last_click": 0, "intervals": [], "banned": False},
-            ws2: {"ws": ws2, "id": id2, "clicks": 0, "last_click": 0, "intervals": [], "banned": False}
-        }
-        self.started = False
+class Battle {
+  constructor(p1, p2) {
+    this.id = crypto.randomUUID();
+    this.players = new Map();
+    this.players.set(p1.ws, { ws: p1.ws, id: p1.id, clicks: 0, lastClick: 0, intervals: [], banned: false });
+    this.players.set(p2.ws, { ws: p2.ws, id: p2.id, clicks: 0, lastClick: 0, intervals: [], banned: false });
+    this.started = false;
     
-    async def start(self):
-        for ws, p in self.players.items():
-            opp = [x for x in self.players.values() if x["ws"] != ws][0]
-            await ws.send(json.dumps({
-                "type": "match_found",
-                "yourId": p["id"],
-                "opponentId": opp["id"]
-            }))
-        
-        for count in [3, 2, 1, 0]:
-            for ws in self.players:
-                await ws.send(json.dumps({"type": "countdown", "count": count}))
-            await asyncio.sleep(1)
-        
-        self.started = True
-        self.start_time = time.time()
-        for ws in self.players:
-            await ws.send(json.dumps({"type": "battle_start"}))
-        
-        while time.time() - self.start_time < 10:
-            left = max(0, 10 - (time.time() - self.start_time))
-            for ws in self.players:
-                await ws.send(json.dumps({"type": "timer", "timeLeft": int(left * 1000)}))
-            await asyncio.sleep(0.05)
-        
-        self.started = False
-        winner = None
-        max_clicks = -1
-        draw = False
-        
-        for p in self.players.values():
-            if not p["banned"] and p["clicks"] > max_clicks:
-                max_clicks = p["clicks"]
-                winner = p["id"]
-                draw = False
-            elif not p["banned"] and p["clicks"] == max_clicks:
-                draw = True
-        
-        result = {
-            "type": "battle_end",
-            "winner": None if draw else winner,
-            "isDraw": draw,
-            "scores": {p["id"]: {"clicks": p["clicks"], "disqualified": p["banned"]} for p in self.players.values()}
-        }
-        
-        for ws in self.players:
-            await ws.send(json.dumps(result))
-        
-        del battles[self.id]
+    for (let [ws, p] of this.players) {
+      ws.send(JSON.stringify({
+        type: "match_found",
+        yourId: p.id,
+        opponentId: [...this.players.values()].find(x => x.ws !== ws).id
+      }));
+    }
     
-    def click(self, ws):
-        if not self.started:
-            return
-        p = self.players[ws]
-        if p["banned"]:
-            return
-        
-        now = time.time() * 1000
-        interval = now - p["last_click"] if p["last_click"] > 0 else 999
-        
-        if interval < 60 and p["last_click"] > 0:
-            p["banned"] = True
-            asyncio.create_task(ws.send(json.dumps({"type": "disqualified"})))
-            return
-        
-        p["intervals"].append(interval)
-        if len(p["intervals"]) > 20:
-            p["intervals"].pop(0)
-        
-        if len(p["intervals"]) >= 10:
-            recent = p["intervals"][-10:]
-            unique = set(round(i / 10) * 10 for i in recent)
-            if len(unique) <= 2:
-                p["banned"] = True
-                asyncio.create_task(ws.send(json.dumps({"type": "disqualified"})))
-                return
-        
-        p["clicks"] += 1
-        p["last_click"] = now
-        
-        scores = {pl["id"]: pl["clicks"] for pl in self.players.values()}
-        for w in self.players:
-            asyncio.create_task(w.send(json.dumps({"type": "score_update", "scores": scores})))
+    let count = 3;
+    const ci = setInterval(() => {
+      for (let [ws] of this.players) ws.send(JSON.stringify({ type: "countdown", count }));
+      count--;
+      if (count < 0) {
+        clearInterval(ci);
+        this.start();
+      }
+    }, 1000);
+  }
+  
+  start() {
+    this.started = true;
+    this.startTime = Date.now();
+    for (let [ws] of this.players) ws.send(JSON.stringify({ type: "battle_start" }));
+    
+    const ti = setInterval(() => {
+      const left = Math.max(0, 10000 - (Date.now() - this.startTime));
+      for (let [ws] of this.players) ws.send(JSON.stringify({ type: "timer", timeLeft: left }));
+      if (left <= 0) { clearInterval(ti); this.end(); }
+    }, 50);
+  }
+  
+  click(ws) {
+    if (!this.started) return;
+    const p = this.players.get(ws);
+    if (!p || p.banned) return;
+    
+    const now = Date.now();
+    const interval = p.lastClick ? now - p.lastClick : 999;
+    
+    if (interval < 60 && p.lastClick > 0) {
+      p.banned = true;
+      ws.send(JSON.stringify({ type: "disqualified", reason: "too fast" }));
+      return;
+    }
+    
+    p.intervals.push(interval);
+    if (p.intervals.length > 20) p.intervals.shift();
+    
+    if (p.intervals.length >= 10) {
+      const u = new Set(p.intervals.slice(-10).map(i => Math.round(i / 10) * 10));
+      if (u.size <= 2) {
+        p.banned = true;
+        ws.send(JSON.stringify({ type: "disqualified", reason: "autoclicker" }));
+        return;
+      }
+    }
+    
+    p.clicks++;
+    p.lastClick = now;
+    
+    const scores = {};
+    for (let [w, pl] of this.players) scores[pl.id] = pl.clicks;
+    for (let [w] of this.players) w.send(JSON.stringify({ type: "score_update", scores }));
+  }
+  
+  end() {
+    this.started = false;
+    let winner = null, max = -1, draw = false;
+    
+    for (let [w, p] of this.players) {
+      if (!p.banned && p.clicks > max) { max = p.clicks; winner = p.id; draw = false; }
+      else if (!p.banned && p.clicks === max) draw = true;
+    }
+    
+    const result = { type: "battle_end", winner: draw ? null : winner, isDraw: draw, scores: {} };
+    for (let [w, p] of this.players) result.scores[p.id] = { clicks: p.clicks, disqualified: p.banned };
+    for (let [w] of this.players) w.send(JSON.stringify(result));
+    battles.delete(this.id);
+  }
+  
+  disconnect(ws) {
+    for (let [w, p] of this.players) {
+      if (w !== ws) w.send(JSON.stringify({ type: "opponent_disconnected" }));
+    }
+    battles.delete(this.id);
+  }
+}
 
-async def handler(websocket):
-    player_id = str(uuid.uuid4())[:8]
-    await websocket.send(json.dumps({"type": "connected", "userId": player_id}))
-    print(f"Игрок {player_id} подключился")
+wss.on('connection', (ws) => {
+  const id = crypto.randomUUID().slice(0, 8);
+  ws.send(JSON.stringify({ type: "connected", userId: id }));
+  
+  ws.on('message', (data) => {
+    const msg = JSON.parse(data.toString());
     
-    try:
-        async for message in websocket:
-            msg = json.loads(message)
-            
-            if msg["type"] == "find_match":
-                if waiting:
-                    opp_ws, opp_id = waiting.pop(0)
-                    battle = Battle(websocket, player_id, opp_ws, opp_id)
-                    battles[battle.id] = battle
-                    asyncio.create_task(battle.start())
-                    print(f"Битва! {player_id} vs {opp_id}")
-                else:
-                    waiting.append((websocket, player_id))
-                    await websocket.send(json.dumps({"type": "waiting"}))
-                    print(f"{player_id} ждёт противника")
-            
-            elif msg["type"] == "click":
-                for battle in battles.values():
-                    if websocket in battle.players:
-                        battle.click(websocket)
-                        break
+    if (msg.type === "find_match") {
+      if (waiting.length > 0) {
+        const opp = waiting.shift();
+        const battle = new Battle(opp, { ws, id });
+        battles.set(battle.id, battle);
+      } else {
+        waiting.push({ ws, id });
+        ws.send(JSON.stringify({ type: "waiting" }));
+      }
+    }
     
-    except:
-        print(f"Игрок {player_id} отключился")
-    
-    finally:
-        for i, (ws, pid) in enumerate(waiting):
-            if ws == websocket:
-                waiting.pop(i)
-                break
-        
-        for battle in list(battles.values()):
-            if websocket in battle.players:
-                for ws in battle.players:
-                    if ws != websocket:
-                        await ws.send(json.dumps({"type": "opponent_disconnected"}))
-                del battles[battle.id]
+    if (msg.type === "click") {
+      for (let [bid, battle] of battles) {
+        if (battle.players.has(ws)) { battle.click(ws); break; }
+      }
+    }
+  });
+  
+  ws.on('close', () => {
+    const idx = waiting.findIndex(p => p.ws === ws);
+    if (idx !== -1) waiting.splice(idx, 1);
+    for (let [bid, battle] of battles) {
+      if (battle.players.has(ws)) { battle.disconnect(ws); break; }
+    }
+  });
+});
 
-async def main():
-    print("Сервер кликер-батла запущен на порту 8080")
-    async with websockets.serve(handler, "0.0.0.0", 8080):
-        await asyncio.Future()
-
-asyncio.run(main())
+console.log('Server started');
