@@ -3,15 +3,14 @@ const crypto = require('crypto');
 const app = express();
 app.use(express.json());
 
-const waiting = [];
-const battles = {};
-
-// CORS для Godot
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Headers', 'Content-Type');
     next();
 });
+
+const waiting = [];
+const battles = {};
 
 // Подключение
 app.post('/connect', (req, res) => {
@@ -19,7 +18,7 @@ app.post('/connect', (req, res) => {
     res.json({ type: "connected", userId: id });
 });
 
-// Поиск матча (долгий опрос)
+// Поиск матча
 app.post('/find_match', (req, res) => {
     const { userId } = req.body;
     
@@ -29,21 +28,13 @@ app.post('/find_match', (req, res) => {
         
         battles[battleId] = {
             id: battleId,
-            players: {
-                [userId]: { clicks: 0 },
-                [opponent.userId]: { clicks: 0 }
+            players: { 
+                [userId]: { clicks: 0 }, 
+                [opponent.userId]: { clicks: 0 } 
             },
             startTime: Date.now(),
             winner: null
         };
-        
-        // Обоим вернём что матч найден
-        opponent.res.json({
-            type: "match_found",
-            yourId: opponent.userId,
-            opponentId: userId,
-            battleId: battleId
-        });
         
         res.json({
             type: "match_found",
@@ -52,15 +43,30 @@ app.post('/find_match', (req, res) => {
             battleId: battleId
         });
     } else {
-        // Ждём 30 секунд или пока не появится противник
-        const timeout = setTimeout(() => {
-            const idx = waiting.findIndex(w => w.userId === userId);
-            if (idx !== -1) waiting.splice(idx, 1);
-            res.json({ type: "waiting_timeout" });
-        }, 30000);
-        
-        waiting.push({ userId, res, timeout });
+        // Быстро отвечаем что в очереди
+        waiting.push({ userId });
+        res.json({ type: "waiting" });
     }
+});
+
+// Проверка статуса матча
+app.post('/check_match', (req, res) => {
+    const { userId } = req.body;
+    
+    // Проверяем есть ли битва с этим игроком
+    for (let [bid, battle] of Object.entries(battles)) {
+        if (battle.players[userId] !== undefined && !battle.winner) {
+            const otherId = Object.keys(battle.players).find(id => id !== userId);
+            return res.json({
+                type: "match_found",
+                yourId: userId,
+                opponentId: otherId,
+                battleId: bid
+            });
+        }
+    }
+    
+    res.json({ type: "waiting" });
 });
 
 // Клик
@@ -68,66 +74,28 @@ app.post('/click', (req, res) => {
     const { battleId, userId } = req.body;
     const battle = battles[battleId];
     
-    if (!battle) {
-        return res.json({ error: "battle not found" });
+    if (!battle || battle.winner) {
+        return res.json({ type: "battle_over" });
     }
     
-    if (battle.players[userId] !== undefined) {
-        battle.players[userId].clicks++;
-    }
+    battle.players[userId].clicks++;
     
     const elapsed = Date.now() - battle.startTime;
     const timeLeft = Math.max(0, 10000 - elapsed);
     
-    if (timeLeft <= 0 && !battle.winner) {
+    if (timeLeft <= 0) {
         let max = -1;
         for (let [id, data] of Object.entries(battle.players)) {
-            if (data.clicks > max) {
-                max = data.clicks;
-                battle.winner = id;
-            }
+            if (data.clicks > max) { max = data.clicks; battle.winner = id; }
         }
+        if (!battle.winner) battle.winner = "draw";
     }
     
     res.json({
         type: "click_ok",
-        scores: Object.fromEntries(
-            Object.entries(battle.players).map(([id, data]) => [id, data.clicks])
-        ),
+        scores: Object.fromEntries(Object.entries(battle.players).map(([id, d]) => [id, d.clicks])),
         timeLeft: timeLeft,
-        winner: battle.winner
-    });
-});
-
-// Статус битвы
-app.post('/battle_status', (req, res) => {
-    const { battleId } = req.body;
-    const battle = battles[battleId];
-    
-    if (!battle) {
-        return res.json({ type: "battle_end", reason: "not found" });
-    }
-    
-    const elapsed = Date.now() - battle.startTime;
-    const timeLeft = Math.max(0, 10000 - elapsed);
-    
-    if (timeLeft <= 0 && !battle.winner) {
-        let max = -1;
-        for (let [id, data] of Object.entries(battle.players)) {
-            if (data.clicks > max) {
-                max = data.clicks;
-                battle.winner = id;
-            }
-        }
-    }
-    
-    res.json({
-        type: "status",
-        scores: Object.fromEntries(
-            Object.entries(battle.players).map(([id, data]) => [id, data.clicks])
-        ),
-        timeLeft: timeLeft,
-        winner: battle.winner
+        winner: battle.winner || null
     });
 });
 
