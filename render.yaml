@@ -1,6 +1,7 @@
 services:
   - type: web
     name: clicker-battle
-    env: node
+    runtime: node
     buildCommand: npm install
-    startCommand: node server.js
+    startCommand: npm start
+    healthCheckPath: /health
