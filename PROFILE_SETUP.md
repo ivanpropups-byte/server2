@@ -4,8 +4,8 @@ The server keeps a player's nickname, 96×96 avatar, Bubble points, and played-g
 
 ## Bubble points
 
-- New profiles start at 1,000 Bubble points.
-- A win adds 25 points; a loss removes 15 points; a draw leaves points unchanged.
+- New profiles start at 0 Bubble points.
+- A win adds 25 points; a loss removes 15 points but never lowers a score below 0; a draw leaves points unchanged.
 - Matchmaking first prefers an opponent with equal or higher Bubble points.
 - The allowed difference starts at 150 points and grows by 200 every five seconds, up to 2,000. If no equal or higher opponent is available, the server can match with the strongest lower-rated player in range.
 - The leaderboard shows the top 50 profiles and includes the current player's own rank if they are outside the top 50.
