@@ -35,6 +35,7 @@ const ALLOWED_SKINS = new Set([
   "bubble_ghost",
   "bubble_earth",
   "bubble_crystal",
+  "bubble_glasses",
 ]);
 
 const waiting = [];
